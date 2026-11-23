@@ -1,0 +1,4 @@
+{"docker": true, "containers": ["postgres", "redis", "api", "mailpit"],
+ "devices": [{"kind":"android","name":"Pixel_8","link":"emulador"},{"kind":"ios","name":"iPhone 16","link":"simulador"}],
+ "servers": [{"port":3000,"kind":"web"},{"port":4000,"kind":"nest"},{"port":5432,"kind":"postgres"},{"port":8081,"kind":"Metro"},{"port":6379,"kind":"redis"}],
+ "watchers": ["#42","#57"]}
