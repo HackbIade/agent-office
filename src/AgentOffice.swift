@@ -1380,12 +1380,66 @@ final class App: NSObject, NSApplicationDelegate {
         let n = NSMenuItem(title: "Avisos con sonido", action: #selector(toggleNotify(_:)), keyEquivalent: "")
         n.target = self; n.state = notifyOn ? .on : .off; menu.addItem(n)
         menu.addItem(.separator())
+        let h = NSMenuItem(title: "Ocultar la oficina", action: #selector(toggleOffice), keyEquivalent: ""); h.target = self; menu.addItem(h)
         let q = NSMenuItem(title: "Cerrar la oficina", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); menu.addItem(q)
         view.menu = menu
-        panel.orderFrontRegardless()
+        setUpStatusItem(menu)
+        if !UserDefaults.standard.bool(forKey: "hidden") { panel.orderFrontRegardless() }
         readBoard(); pollMachines()
         view.render()
         schedule(0.16)
+    }
+
+    // MARK: Menu bar
+
+    /// Left click shows or hides the office; right click opens the same menu as the office.
+    /// The icon carries the "Tu turno" count, so it still tells you when something waits while hidden.
+    var statusItem: NSStatusItem!
+    var statusMenu: NSMenu!
+    var lastBadge = -1
+
+    func setUpStatusItem(_ menu: NSMenu) {
+        statusMenu = menu
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard let b = statusItem.button else { return }
+        let img = NSImage(systemSymbolName: "building.2", accessibilityDescription: "Agent Office")
+        img?.isTemplate = true
+        b.image = img; b.imagePosition = .imageLeading
+        b.toolTip = "Agent Office: clic para mostrar u ocultar, clic derecho para el menú"
+        b.target = self; b.action = #selector(statusClicked(_:))
+        b.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        updateBadge()
+    }
+
+    @objc func statusClicked(_ sender: NSStatusBarButton) {
+        let e = NSApp.currentEvent
+        if e?.type == .rightMouseUp || e?.modifierFlags.contains(.control) == true {
+            statusItem.menu = statusMenu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
+        } else {
+            toggleOffice()
+        }
+    }
+
+    @objc func toggleOffice() {
+        let show = !panel.isVisible
+        if show { panel.orderFrontRegardless(); view.render() } else { panel.orderOut(nil) }
+        UserDefaults.standard.set(!show, forKey: "hidden")
+        statusMenu.items.first { $0.action == #selector(toggleOffice) }?.title = show ? "Ocultar la oficina" : "Mostrar la oficina"
+    }
+
+    func updateBadge() {
+        let n = office.turns.count
+        guard n != lastBadge, let b = statusItem?.button else { return }
+        lastBadge = n
+        if n > 0 {
+            b.attributedTitle = NSAttributedString(string: " \(n)", attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
+                .foregroundColor: NSColor.systemOrange])
+        } else {
+            b.title = ""
+        }
     }
 
     @objc func resize(_ s: NSMenuItem) {
@@ -1413,6 +1467,7 @@ final class App: NSObject, NSApplicationDelegate {
         office.prune(now: now)
         office.turns = office.computeTurns()
         announce()
+        updateBadge()
         view.frameNo += rate < 0.5 ? 1 : 6
         if panel.occlusionState.contains(.visible) { view.render() }
         snapshotIfRequested()

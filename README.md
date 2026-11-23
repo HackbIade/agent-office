@@ -96,6 +96,8 @@ open, run `/hooks` once so it reloads the settings.
 
 **Using it:** drag it anywhere. Right-click for small, medium or large size, to turn the
 sound notifications on or off, or to close it. Reopen it with `open ~/agent-office/AgentOffice.app`.
+The menu bar icon shows or hides the office with a click (right-click opens the same menu),
+and shows how many items wait for you, so you can keep the office hidden while you read.
 
 ## Uninstall
 
@@ -193,6 +195,7 @@ necesita tu permiso levanta la mano, muestra un `!` rojo y su escritorio brilla.
   esperando aprobación, listo, mezclado), con lo urgente primero. Se filtra con
   `board.conf` y se le agregan tareas a mano en `tasks.json`.
 - Arrástrala donde quieras; con clic derecho cambias el tamaño o la cierras.
+- El ícono de la barra de menús la muestra u oculta con un clic (clic derecho abre el menú) y muestra cuántas cosas esperan tu turno, aunque esté oculta.
 
 ## License
 
