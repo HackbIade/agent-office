@@ -14,6 +14,7 @@ command -v jq >/dev/null || { echo "jq not found. Install it with: brew install 
 
 mkdir -p "$DIR"
 cp "$ROOT/scripts/hook.sh" "$HOOK"; chmod +x "$HOOK"
+cp "$ROOT/scripts/board.sh" "$DIR/board.sh"; chmod +x "$DIR/board.sh"
 "$ROOT/scripts/build.sh" "$DIR"
 
 # Add one async hook per event, next to whatever hooks are already there.

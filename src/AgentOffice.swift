@@ -12,6 +12,9 @@ struct Ev: Decodable {
     let aid: String; let atype: String; let tool: String; let bg: Bool; let ntype: String; let d: String
 }
 
+struct BoardItem: Decodable { let repo: String?; let number: Int?; let title: String; let stage: String; let note: String? }
+struct Board: Decodable { let updated: Double?; let items: [BoardItem] }
+
 enum Act { case idle, think, type, read, write, delegate, talk, browse, wait, done }
 
 final class Agent {
@@ -35,6 +38,14 @@ func label(forKind k: String) -> String {
     }
 }
 
+/// Short, readable detail: file name instead of a path, no leading `cd <dir> &&`, ~ for home.
+func tidy(_ d: String) -> String {
+    if d.hasPrefix("/") && !d.contains(" ") { return (d as NSString).lastPathComponent }
+    var s = d.replacingOccurrences(of: #"^cd \S+ (&& |; )?"#, with: "", options: .regularExpression)
+    s = s.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+    return s
+}
+
 func act(forTool t: String) -> Act {
     switch t {
     case "Read", "Grep", "Glob": return .read
@@ -53,7 +64,8 @@ func act(forTool t: String) -> Act {
 
 final class Office {
     var agents: [String: Agent] = [:]
-    var pendingDesc: [String: String] = [:]
+    var pendingDesc: [String: [String]] = [:]
+    var board: [BoardItem] = []
     var watchers: [String] = []
     var docker = false
     let slots = 6
@@ -88,13 +100,19 @@ final class Office {
         case "UserPromptSubmit": target.act = .think; target.detail = "pensando…"
         case "PreToolUse":
             target.act = act(forTool: e.tool)
-            target.detail = e.d.isEmpty ? e.tool : (e.d.hasPrefix("/") ? (e.d as NSString).lastPathComponent : e.d)
-            if e.tool == "Agent" || e.tool == "Task" { pendingDesc[e.sid] = e.d }
+            target.detail = tidy(e.d.isEmpty ? e.tool : e.d)
+            if e.tool == "Agent" || e.tool == "Task" { pendingDesc[e.sid, default: []].append(e.d) }
         case "PostToolUse", "PostToolUseFailure":
             if target.act != .wait { target.act = .think }
         case "SubagentStart":
             target.act = .think
-            if let d = pendingDesc.removeValue(forKey: e.sid) { target.detail = d }
+            if var q = pendingDesc[e.sid], !q.isEmpty {
+                let d = q.removeFirst(); pendingDesc[e.sid] = q; target.detail = d
+                let l = d.lowercased()
+                let pr = d.range(of: #"#\d+"#, options: .regularExpression).map { " " + d[$0] } ?? ""
+                if l.contains("review") || l.contains("revis") { target.kind = "reviewer"; target.name = "Revisor" + pr }
+                else if l.contains("verif") && target.kind != "ac-verifier" { target.name = "Verificador" + pr }
+            }
         case "SubagentStop": target.act = .done; target.detail = "terminó"; target.leaving = e.t
         case "Notification":
             target.act = .wait
@@ -155,14 +173,14 @@ func c(_ hex: UInt32) -> NSColor {
 
 let kindColor: [String: UInt32] = [
     "lead": 0xE07A4F, "ac-verifier": 0x4FB477, "Explore": 0x4F8FE0, "general-purpose": 0x9B6FD6,
-    "fork": 0xE0C04F, "Plan": 0x4FC6C6, "web-fetch": 0xD65F9B, "watcher": 0x8A93A6,
+    "fork": 0xE0C04F, "reviewer": 0x6FD6B0, "Plan": 0x4FC6C6, "web-fetch": 0xD65F9B, "watcher": 0x8A93A6,
 ]
 
 final class OfficeView: NSView {
     let office: Office
     var P: CGFloat = 3
     var frameNo = 0
-    let W = 150, H = 104
+    let W = 232, H = 104
     static let df: DateFormatter = { let d = DateFormatter(); d.dateFormat = "HH:mm"; return d }()
     init(office: Office) { self.office = office; super.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError() }
@@ -173,7 +191,7 @@ final class OfficeView: NSView {
         c(col).setFill(); NSRect(x: CGFloat(x) * P, y: CGFloat(y) * P, width: CGFloat(w) * P, height: CGFloat(h) * P).fill()
     }
 
-    func text(_ s: String, _ x: Int, _ y: Int, size: CGFloat, col: UInt32, bold: Bool = false, maxW: Int = 44) {
+    func text(_ s: String, _ x: Int, _ y: Int, size: CGFloat, col: UInt32, bold: Bool = false, maxW: Int = 37) {
         let f = NSFont.monospacedSystemFont(ofSize: size * P / 3, weight: bold ? .bold : .regular)
         let p = NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail; p.alignment = .center
         let a: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: c(col), .paragraphStyle: p]
@@ -207,6 +225,45 @@ final class OfficeView: NSView {
         let lobby = office.agents.values.filter { $0.slot < 0 }.count
         if lobby > 0 { text("+\(lobby) en el lobby", 88, 99, size: 7, col: 0xA9AEC4, maxW: 36) }
         drawWatchers(f)
+        drawBoard(f)
+    }
+
+    static let stages: [String: (String, UInt32)] = [
+        "comments": ("comentarios", 0xF2C14E), "ci_red": ("CI en rojo", 0xD64F4F), "changes": ("piden cambios", 0xD64F4F),
+        "ci_running": ("CI corriendo", 0x7EC8F0), "approval": ("esperando aprobación", 0xB0B6C8), "ready": ("listo para mezclar", 0x7CF29A),
+        "draft": ("borrador", 0x6B7088), "merged": ("mezclado", 0x4FB477), "waiting": ("esperando", 0xE0A3F2), "working": ("en curso", 0x4F8FE0),
+    ]
+
+    /// Cork board with the pull requests and tasks from board.json.
+    func drawBoard(_ f: Int) {
+        let bx = 152
+        px(150, 0, W - 150, H, 0x262A3D); px(150, 0, 2, H, 0x1B1D2B)
+        px(bx + 4, 4, W - bx - 8, H - 8, 0x8B5E3C); px(bx + 5, 5, W - bx - 10, H - 10, 0xC69C6D)
+        text("PIZARRA", bx + 5, 6, size: 9, col: 0x3A2A1C, bold: true, maxW: W - bx - 10)
+        let items = office.board
+        if items.isEmpty { text("sin PRs ni tareas", bx + 5, 20, size: 7, col: 0x5A4A3A, maxW: W - bx - 10); return }
+        let rowH = 8, maxRows = (H - 26) / rowH
+        for (i, it) in items.prefix(maxRows).enumerated() {
+            let y = 14 + i * rowH
+            let (label, col) = OfficeView.stages[it.stage] ?? (it.stage, 0xB0B6C8)
+            px(bx + 7, y, W - bx - 14, rowH - 1, 0xF2E9DC)
+            let blink = (it.stage == "comments" || it.stage == "ci_red") && (f / 4) % 2 == 0
+            px(bx + 8, y + 1, 2, rowH - 3, blink ? 0xFFFFFF : col)
+            px(bx + 11 + (i * 7) % (W - bx - 30), y - 1, 2, 1, 0xD64F4F)
+            let id = it.number.map { "#\($0) " } ?? ""
+            let repo = (it.repo ?? "").replacingOccurrences(of: "treinta-", with: "")
+            let title = it.title.replacingOccurrences(of: #"^\w+\(([A-Z]+-\d+)\): "#, with: "$1 ", options: .regularExpression)
+            textL(id + title, bx + 12, y, size: 6.5, col: 0x2E3247, bold: true, maxW: W - bx - 20)
+            textL(label + (it.note.map { $0.isEmpty ? "" : " · " + $0 } ?? "") + (repo.isEmpty ? "" : "  " + repo), bx + 12, y + 3, size: 6, col: col == 0xB0B6C8 ? 0x6B7088 : col, maxW: W - bx - 20)
+        }
+        if items.count > maxRows { text("+\(items.count - maxRows) más", bx + 5, H - 9, size: 6.5, col: 0x3A2A1C, maxW: W - bx - 10) }
+    }
+
+    func textL(_ s: String, _ x: Int, _ y: Int, size: CGFloat, col: UInt32, bold: Bool = false, maxW: Int) {
+        let f = NSFont.monospacedSystemFont(ofSize: size * P / 3, weight: bold ? .bold : .regular)
+        let p = NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail
+        (s as NSString).draw(in: NSRect(x: CGFloat(x) * P, y: CGFloat(y) * P, width: CGFloat(maxW) * P, height: size * P / 3 + 4),
+                             withAttributes: [.font: f, .foregroundColor: c(col), .paragraphStyle: p])
     }
 
     func drawServer(_ f: Int) {
@@ -245,10 +302,10 @@ final class OfficeView: NSView {
         px(x, y, 36, 3, 0xA0714F); px(x, y + 3, 36, 3, 0x7A5238); px(x + 2, y + 6, 2, 2, 0x5A3C28); px(x + 32, y + 6, 2, 2, 0x5A3C28)
         if a?.act == .idle { px(x + 5, y - 2, 3, 2, 0xF2E9DC); if (f / 4) % 2 == 0 { px(x + 6, y - 4, 1, 1, 0xC9CEDF) } else { px(x + 6, y - 5, 1, 1, 0xC9CEDF) } }
         if let a = a {
-            text(a.name, x - 4, y + 8, size: 8, col: kindColor[a.kind] ?? 0xF2E9DC, bold: true)
-            text(a.detail, x - 4, y + 12, size: 6.5, col: 0xA9AEC4)
+            text(a.name, x - 1, y + 8, size: 8, col: kindColor[a.kind] ?? 0xF2E9DC, bold: true)
+            text(a.detail, x - 1, y + 12, size: 6.5, col: 0xA9AEC4)
         } else {
-            text("libre", x - 4, y + 8, size: 7, col: 0x50556E)
+            text("libre", x - 1, y + 8, size: 7, col: 0x50556E)
         }
     }
 
@@ -337,7 +394,7 @@ final class App: NSObject, NSApplicationDelegate {
         let q = NSMenuItem(title: "Cerrar la oficina", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); menu.addItem(q)
         view.menu = menu
         panel.orderFrontRegardless()
-        pollSystem()
+        pollSystem(); readBoard()
         schedule(fast: true)
     }
 
@@ -358,13 +415,38 @@ final class App: NSObject, NSApplicationDelegate {
     func step() {
         tick += 1
         let changed = feed.read(into: office, replay: false)
-        if tick % (fast ? 40 : 5) == 0 { pollSystem() }
+        if tick % (fast ? 40 : 5) == 0 { pollSystem(); readBoard() }
+        if Date().timeIntervalSince1970 - lastBoardRun > 120 { runBoardScript() }
         office.prune(now: Date().timeIntervalSince1970)
         view.frameNo += fast ? 1 : 8
         if panel.occlusionState.contains(.visible) { view.needsDisplay = true }
         snapshotIfRequested()
         let wantFast = office.busy || changed
         if wantFast != fast { schedule(fast: wantFast) }
+    }
+
+    var lastBoardRun = 0.0
+    var boardRunning = false
+
+    func readBoard() {
+        guard let d = FileManager.default.contents(atPath: baseDir + "/board.json"),
+              let b = try? JSONDecoder().decode(Board.self, from: d) else { return }
+        office.board = b.items
+    }
+
+    /// board.sh calls the GitHub CLI, so it runs off the main thread and at most every 2 minutes.
+    func runBoardScript() {
+        lastBoardRun = Date().timeIntervalSince1970
+        let script = baseDir + "/board.sh"
+        guard !boardRunning, FileManager.default.isExecutableFile(atPath: script) else { return }
+        boardRunning = true
+        DispatchQueue.global(qos: .utility).async {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = ["-lc", "\"\(script)\""]
+            var env = ProcessInfo.processInfo.environment; env["AGENT_OFFICE_DIR"] = baseDir; p.environment = env
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            try? p.run(); p.waitUntilExit()
+            DispatchQueue.main.async { self.boardRunning = false; self.readBoard() }
+        }
     }
 
     /// Touch $AGENT_OFFICE_DIR/snap.request to get the current frame as snap.png (no screen-recording permission needed).

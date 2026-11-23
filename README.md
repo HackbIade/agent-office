@@ -36,6 +36,11 @@ agentes de Claude Code. La interfaz está en español. [Ver en español ↓](#en
 - **Server rack:** its lights blink while Docker Desktop is running, so you notice
   when you left it on.
 - The window shows the real sky for the time of day and a clock.
+- **Board (pizarra):** the cork board on the right lists your pull requests with the
+  stage each one is in, most urgent first: unresolved review comments, CI in red,
+  changes requested, CI running, waiting for approval, ready to merge, draft, merged in
+  the last 24 h. Rows that need you blink. A subagent whose task mentions "review" sits
+  at a desk as **Revisor #PR**, so you see who is working each review loop.
 
 ## Install
 
@@ -87,6 +92,27 @@ Claude Code ──hooks (async)──▶ hook.sh ──▶ ~/agent-office/events
 
 Everything stays on your Mac: no network, no telemetry.
 
+### Board
+
+`board.sh` runs every 2 minutes in the background through the GitHub CLI (`gh`, logged
+in). It makes two search queries and writes `board.json`. Without `gh` the board stays
+empty. To narrow it, create `~/agent-office/board.conf`:
+
+```bash
+BOARD_QUERY="base:develop"              # extra GitHub search qualifiers
+BOARD_TITLE_REGEX="PROJ-(12|13)[0-9]"   # keep only matching titles
+```
+
+Rows that are not pull requests (a pending decision, tickets not started) go in
+`~/agent-office/tasks.json`:
+
+```json
+[{"title": "Waiting for product: pricing question", "stage": "waiting", "note": "blocks PROJ-123"}]
+```
+
+Stages: `comments`, `ci_red`, `changes`, `ci_running`, `approval`, `ready`, `draft`,
+`merged`, `waiting`, `working`.
+
 ### Settings
 
 - `AGENT_OFFICE_DIR`: where the events and the app live (default `~/agent-office`).
@@ -105,6 +131,9 @@ agentes de Claude Code: la sesión principal, cada subagente, los scripts vigía
 - **Desinstalar:** `./uninstall.sh` (con `--purge` borra también `~/agent-office`).
 - Agrega hooks asíncronos a `~/.claude/settings.json` sin tocar los que ya tienes y
   guarda un respaldo. No frena a Claude Code y nada sale de tu Mac.
+- La pizarra muestra tus PRs y en qué etapa está cada uno (comentarios, CI en rojo,
+  esperando aprobación, listo, mezclado), con lo urgente primero. Se filtra con
+  `board.conf` y se le agregan tareas a mano en `tasks.json`.
 - Arrástrala donde quieras; con clic derecho cambias el tamaño o la cierras.
 
 ## License
