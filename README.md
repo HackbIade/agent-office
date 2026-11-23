@@ -11,36 +11,49 @@ agentes de Claude Code. La interfaz está en español. [Ver en español ↓](#en
 
 ## What you see
 
+A small office seen from a three-quarter view, like a classic top-down RPG: a back wall
+with a window (the real sky for the time of day), a clock, a coffee counter, a plant, a
+door, a rug and six desks. Next to it sits a **machine room** with the dev infrastructure
+that is running, and on the right wall a **cork board** with your pull requests.
+
 - **One robot per agent.** The orange robot with a gold stripe is the lead (one per
   session, labelled with the project folder). Subagents get their own desk and color:
   green verifier (`ac-verifier`), blue explorer (`Explore`), purple helper
-  (`general-purpose`), yellow clone (`fork`), cyan architect (`Plan`).
+  (`general-purpose`), yellow clone (`fork`), cyan architect (`Plan`), teal reviewer.
   Unknown agent types show with their own name.
+- Agents **walk in through the door** to their desk when they start, and **walk out**
+  with a ✓ when they finish.
 - **What each one is doing**, read from the tool it is using:
 
   | Activity | Monitor | Extra |
   |---|---|---|
-  | Running commands (Bash, MCP tools) | green scrolling code | arms typing |
+  | Running commands (Bash, MCP tools) | green scrolling code | hands typing |
   | Reading (Read, Grep, Glob) | a page | eyes moving |
-  | Editing (Edit, Write) | text being written | arms typing |
+  | Editing (Edit, Write) | text being written | hands typing |
   | Browsing (WebFetch, browser, Figma, Linear) | a web page | |
   | Talking (Slack, mail, SendMessage) | purple chat | speech bubble |
   | Delegating (launching a subagent) | green code | two-boxes bubble |
   | Thinking (between tools) | moving dot | `…` bubble |
-  | **Needs you** (permission prompt, question) | blinking `!` | red `!` bubble |
-  | Idle (turn finished) | screensaver | steaming coffee |
+  | **Needs you** (permission prompt, question) | blinking `!` | red `!` bubble, raised hand, the desk glows |
+  | Idle (turn finished) | screensaver | mug of coffee |
 
-- Agents **pop up** when they start and **sink away with a ✓** when they finish.
-- **Watchers:** any running script named `watch_<number>.sh` stands next to the server
-  with binoculars (handy for "wait until the PR is green" loops).
-- **Server rack:** its lights blink while Docker Desktop is running, so you notice
-  when you left it on.
-- The window shows the real sky for the time of day and a clock.
-- **Board (pizarra):** the cork board on the right lists your pull requests with the
-  stage each one is in, most urgent first: unresolved review comments, CI in red,
-  changes requested, CI running, waiting for approval, ready to merge, draft, merged in
-  the last 24 h. Rows that need you blink. A subagent whose task mentions "review" sits
-  at a desk as **Revisor #PR**, so you see who is working each review loop.
+- **Machine room** (checked every ~10 s in the background; each probe is skipped when its
+  tool is missing):
+  - **Docker:** while Docker Desktop is open, a rack with one blinking light per running
+    container (`docker ps`), named after its image (postgres, redis…). Docker closed
+    leaves the rack dark; a daemon that does not answer shows "docker no responde".
+  - **Phones:** Android emulators (by AVD name) and USB devices through `adb` (only when
+    the adb server is already running, so it is never started for you), and booted iOS
+    simulators (`xcrun simctl`, only while Simulator.app is open), each on a stand.
+  - **Local servers:** your own TCP listeners below the ephemeral range (`lsof`), one
+    little screen each with the port and a friendly name: Metro on 8081, web/vite/next/nest,
+    postgres, redis, mysql… System and desktop apps are ignored.
+  - **Watchers:** any running script named `watch_<number>.sh` stands there with
+    binoculars as **vigía #number** (handy for "wait until the PR is green" loops).
+- **Board (pizarra):** your pull requests with the stage each one is in, most urgent
+  first: unresolved review comments, CI in red, changes requested, CI running, waiting for
+  approval, ready to merge, draft, merged in the last 24 h. Rows that need you blink. A
+  subagent whose task mentions "review" sits at a desk as **Revisor #PR**.
 
 ## Install
 
@@ -87,8 +100,13 @@ Claude Code ──hooks (async)──▶ hook.sh ──▶ ~/agent-office/events
 - `src/AgentOffice.swift` is a single-file AppKit app with no dependencies. It reads new
   lines from the file, keeps a small state per agent and draws the office pixel by pixel.
 
-**Light on resources:** about 55 MB of memory. It draws at 6 fps while something moves,
-1 fps when everyone is idle, and not at all while the window is hidden.
+**Light on resources:** the room and all the text are rendered once into a cached layer
+and redrawn only when some text changes. Each frame draws only the sprites, at the art's
+own resolution (296 × 164 pixels), and Core Animation scales them up with
+nearest-neighbor. It runs at 6 fps while someone works (12 fps for the second a robot
+walks), 1 fps when everyone is idle, and does not draw while the window is hidden. The
+machine-room probes run on a background queue. Measured on an Apple Silicon Mac at the
+medium size: about 1% of one core with six busy agents, 0.25% idle, about 45 MB of memory.
 
 Everything stays on your Mac: no network, no telemetry.
 
@@ -119,12 +137,22 @@ Stages: `comments`, `ci_red`, `changes`, `ci_running`, `approval`, `ready`, `dra
   Set it before `./install.sh`.
 - To export the current frame as an image, touch `$AGENT_OFFICE_DIR/snap.request`; the
   app writes `snap.png` next to it.
+- `AGENT_OFFICE_DEMO_MACHINES`: path to a JSON file that replaces the machine-room probes
+  (for screenshots and demos). See [`docs/demo-machines.json`](docs/demo-machines.json).
 
 ## En español
 
-Una oficina en pixel art que flota en el escritorio de tu Mac y muestra qué hacen tus
-agentes de Claude Code: la sesión principal, cada subagente, los scripts vigías
-(`watch_<número>.sh`) y Docker.
+Una oficina en pixel art, vista en 3/4 desde arriba, que flota en el escritorio de tu Mac
+y muestra qué hacen tus agentes de Claude Code: la sesión principal y cada subagente, cada
+uno en su escritorio. Entran por la puerta cuando empiezan y salen cuando terminan; el que
+necesita tu permiso levanta la mano, muestra un `!` rojo y su escritorio brilla.
+
+- **Sala de máquinas:** lo que tienes corriendo para desarrollar. Un rack con una luz por
+  contenedor de Docker, los emuladores de Android, dispositivos por USB y simuladores de
+  iOS en su soporte, los servidores locales con su puerto (Metro 8081, web 3000, postgres,
+  redis…) y los scripts vigías (`watch_<número>.sh`). Se revisa cada ~10 s en segundo plano.
+- **Liviana:** alrededor de 1 % de un núcleo con seis agentes trabajando, 0,25 % en reposo
+  y unos 45 MB de memoria.
 
 - **Instalar:** `./install.sh` (o `./install.sh --autostart` para que abra al iniciar
   sesión). Necesitas macOS 13+, las Command Line Tools de Xcode y `jq`.
