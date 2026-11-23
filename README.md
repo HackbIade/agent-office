@@ -96,8 +96,11 @@ open, run `/hooks` once so it reloads the settings.
 
 **Using it:** drag it anywhere. Right-click for small, medium or large size, to turn the
 sound notifications on or off, or to close it. Reopen it with `open ~/agent-office/AgentOffice.app`.
-The menu bar icon shows or hides the office with a click (right-click opens the same menu),
-and shows how many items wait for you, so you can keep the office hidden while you read.
+The menu bar icon shows how many items wait for you and opens a live dropdown: what waits for
+you (sessions jump to your terminal, pull requests and issues open in the browser), each agent
+and what it is doing, your pull requests by stage, your tasks, the machines (with "Apagar
+Docker…", which asks first) and free memory, plus actions: show or hide the office, go to the
+terminal, refresh GitHub now, edit tasks. Option-click the icon to show or hide the office directly.
 
 ## Uninstall
 
@@ -195,7 +198,7 @@ necesita tu permiso levanta la mano, muestra un `!` rojo y su escritorio brilla.
   esperando aprobación, listo, mezclado), con lo urgente primero. Se filtra con
   `board.conf` y se le agregan tareas a mano en `tasks.json`.
 - Arrástrala donde quieras; con clic derecho cambias el tamaño o la cierras.
-- El ícono de la barra de menús la muestra u oculta con un clic (clic derecho abre el menú) y muestra cuántas cosas esperan tu turno, aunque esté oculta.
+- El ícono de la barra de menús muestra cuántas cosas esperan tu turno y abre un menú en vivo: tu turno (las sesiones te llevan a la terminal; PRs e issues se abren en el navegador), los agentes y qué hace cada uno, tus PRs por etapa, tus tareas, las máquinas (con "Apagar Docker…", que pregunta antes) y la memoria libre, más acciones: mostrar u ocultar la oficina, ir a la terminal, actualizar GitHub ya y editar tareas. Opción-clic en el ícono la muestra u oculta directo.
 
 ## License
 

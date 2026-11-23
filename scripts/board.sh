@@ -37,7 +37,7 @@ jq -s --arg re "$BOARD_TITLE_REGEX" --argjson yours "$yours" --slurpfile tasks <
   [ .[].data.search.nodes[] | select(.number != null) | select($re == "" or (.title | test($re))) |
     (.commits.nodes[0].commit.statusCheckRollup.state // "") as $ci |
     ([.reviewThreads.nodes[] | select(.isResolved | not)] | length) as $open |
-    { repo: .repository.name, number: .number, title: .title,
+    { repo: .repository.name, number: .number, title: .title, url: .url,
       stage: (if .state == "MERGED" then "merged"
               elif .isDraft then "draft"
               elif ($ci == "FAILURE" or $ci == "ERROR") then "ci_red"

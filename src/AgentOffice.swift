@@ -14,7 +14,7 @@ struct Ev: Decodable {
     let aid: String; let atype: String; let tool: String; let bg: Bool; let ntype: String; let d: String
 }
 
-struct BoardItem: Decodable { let repo: String?; let number: Int?; let title: String; let stage: String; let note: String? }
+struct BoardItem: Decodable { let repo: String?; let number: Int?; let title: String; let stage: String; let note: String?; let url: String? }
 /// Something on GitHub waiting for you: a review request (kind "pr") or an assigned issue ("issue").
 struct YourItem: Decodable { let kind: String; let repo: String?; let number: Int?; let title: String; let url: String?; let since: Double? }
 struct Board: Decodable { let updated: Double?; let items: [BoardItem]; let yours: [YourItem]? }
@@ -1341,7 +1341,7 @@ final class OfficeView: NSView {
 
 // MARK: - App
 
-final class App: NSObject, NSApplicationDelegate {
+final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let office = Office(); let feed = Feed(); let probe = Probe()
     var panel: NSPanel!; var view: OfficeView!
     var timer: Timer?; var rate = 0.0; var tick = 0
@@ -1392,41 +1392,251 @@ final class App: NSObject, NSApplicationDelegate {
 
     // MARK: Menu bar
 
-    /// Left click shows or hides the office; right click opens the same menu as the office.
-    /// The icon carries the "Tu turno" count, so it still tells you when something waits while hidden.
+    /// Click opens a live dropdown (what waits for you, agents, pull requests, tasks, machines,
+    /// actions); Option-click shows or hides the office directly. The icon carries the "Tu turno"
+    /// count, so it still tells you when something waits while the office is hidden.
     var statusItem: NSStatusItem!
-    var statusMenu: NSMenu!
+    var officeMenu: NSMenu!
+    let statusMenu = NSMenu()
     var lastBadge = -1
 
     func setUpStatusItem(_ menu: NSMenu) {
-        statusMenu = menu
+        officeMenu = menu
+        statusMenu.delegate = self; statusMenu.autoenablesItems = false
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let b = statusItem.button else { return }
         let img = NSImage(systemSymbolName: "building.2", accessibilityDescription: "Agent Office")
         img?.isTemplate = true
         b.image = img; b.imagePosition = .imageLeading
-        b.toolTip = "Agent Office: clic para mostrar u ocultar, clic derecho para el menú"
+        b.toolTip = "Agent Office: clic para el menú, Opción-clic para mostrar u ocultar la oficina"
         b.target = self; b.action = #selector(statusClicked(_:))
         b.sendAction(on: [.leftMouseUp, .rightMouseUp])
         updateBadge()
     }
 
     @objc func statusClicked(_ sender: NSStatusBarButton) {
-        let e = NSApp.currentEvent
-        if e?.type == .rightMouseUp || e?.modifierFlags.contains(.control) == true {
-            statusItem.menu = statusMenu
-            statusItem.button?.performClick(nil)
-            statusItem.menu = nil
-        } else {
-            toggleOffice()
-        }
+        if NSApp.currentEvent?.modifierFlags.contains(.option) == true { toggleOffice(); return }
+        statusItem.menu = statusMenu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
     }
 
     @objc func toggleOffice() {
         let show = !panel.isVisible
         if show { panel.orderFrontRegardless(); view.render() } else { panel.orderOut(nil) }
         UserDefaults.standard.set(!show, forKey: "hidden")
-        statusMenu.items.first { $0.action == #selector(toggleOffice) }?.title = show ? "Ocultar la oficina" : "Mostrar la oficina"
+        officeMenu.items.first { $0.action == #selector(toggleOffice) }?.title = show ? "Ocultar la oficina" : "Mostrar la oficina"
+    }
+
+    // MARK: Dropdown
+
+    func menuNeedsUpdate(_ m: NSMenu) {
+        guard m === statusMenu else { return }
+        m.removeAllItems()
+        let now = Date().timeIntervalSince1970
+        let working = office.agents.values.filter { $0.leaving == nil }
+        let mach = office.machines
+
+        // Header: one glance at the whole office.
+        var head = working.isEmpty ? "Oficina vacía" : (working.count == 1 ? "1 agente trabajando" : "\(working.count) agentes trabajando")
+        if let gb = availableMemoryGB() { head += String(format: " · %.1f GB libres", gb) }
+        m.addItem(info(head, bold: true))
+
+        // What needs you, oldest first. Sessions jump to the terminal; GitHub rows open in the browser.
+        let turns = office.turns
+        section(m, turns.isEmpty ? "Tu turno: nada pendiente" : "Tu turno (\(turns.count))")
+        for t in turns.prefix(12) {
+            let icon: String
+            switch t.kind {
+            case "perm": icon = "hand.raised"; case "ask": icon = "questionmark.bubble"; case "done": icon = "checkmark.circle"
+            case "pr": icon = "arrow.triangle.pull"; default: icon = "exclamationmark.circle"
+            }
+            let it = row(t.title, sub: t.sub + " · " + ago(now - t.since), symbol: icon)
+            if let u = t.url { it.representedObject = u; it.action = #selector(openURL(_:)) } else { it.action = #selector(openTerminal) }
+            it.target = self
+            m.addItem(it)
+        }
+
+        // Agents at their desks and what each one is doing.
+        if !working.isEmpty {
+            section(m, "Agentes")
+            let ordered = working.sorted { a, b in
+                let ka = a.kind == "lead" ? 0 : 1, kb = b.kind == "lead" ? 0 : 1
+                return ka != kb ? ka < kb : a.born < b.born
+            }
+            for a in ordered {
+                let lead = a.kind == "lead"
+                let who = lead ? a.name : "  " + label(forKind: a.kind)
+                let what = actWord(a.act) + (a.detail.isEmpty ? "" : ": " + String(a.detail.prefix(60)))
+                m.addItem(row(who, sub: what + " · " + ago(now - a.last), symbol: lead ? "person.fill" : "person"))
+            }
+        }
+
+        // Pull requests: the ones that need something first; merged ones go in a submenu.
+        let open = office.board.filter { $0.number != nil && $0.stage != "merged" }
+        let merged = office.board.filter { $0.number != nil && $0.stage == "merged" }
+        if !open.isEmpty || !merged.isEmpty {
+            section(m, "Pull requests")
+            for b in open { m.addItem(prRow(b)) }
+            if !merged.isEmpty {
+                let sm = NSMenu(); sm.autoenablesItems = false
+                merged.forEach { sm.addItem(prRow($0)) }
+                let it = row("Mezclados (\(merged.count))", sub: nil, symbol: "checkmark.seal"); it.submenu = sm
+                m.addItem(it)
+            }
+        }
+
+        // Hand-written tasks (tasks.json).
+        let tasks = office.board.filter { $0.number == nil }
+        if !tasks.isEmpty {
+            section(m, "Tareas")
+            for t in tasks {
+                let sub = [stageWord(t.stage), t.note ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+                m.addItem(row(t.title, sub: sub, symbol: stageSymbol(t.stage)))
+            }
+        }
+
+        // Machines, with the one action that frees the most memory.
+        section(m, "Máquinas")
+        if mach.docker {
+            let c = mach.containers.isEmpty ? "sin contenedores" : mach.containers.joined(separator: ", ")
+            m.addItem(row(mach.dockerStuck ? "Docker colgado" : "Docker encendido", sub: c, symbol: "shippingbox"))
+            let off = NSMenuItem(title: "Apagar Docker…", action: #selector(quitDocker), keyEquivalent: ""); off.target = self; off.indentationLevel = 1
+            m.addItem(off)
+        } else {
+            m.addItem(row("Docker apagado", sub: nil, symbol: "shippingbox"))
+        }
+        for d in mach.devices { m.addItem(row(d.kind == "ios" ? "Simulador iOS" : "Emulador Android", sub: d.name, symbol: "iphone")) }
+        for s in mach.servers { m.addItem(row("\(s.kind) :\(s.port)", sub: nil, symbol: "server.rack")) }
+        if !mach.watchers.isEmpty { m.addItem(row("Vigías", sub: mach.watchers.joined(separator: ", "), symbol: "eye")) }
+
+        // Actions.
+        m.addItem(.separator())
+        func action(_ t: String, _ sel: Selector, _ key: String = "") {
+            let i = NSMenuItem(title: t, action: sel, keyEquivalent: key); i.target = self; m.addItem(i)
+        }
+        action(panel.isVisible ? "Ocultar la oficina" : "Mostrar la oficina", #selector(toggleOffice), "o")
+        action("Ir a la terminal", #selector(openTerminal), "t")
+        action("Actualizar pull requests ahora", #selector(refreshBoard), "r")
+        action("Editar tareas…", #selector(editTasks))
+        let more = NSMenuItem(title: "Ajustes", action: nil, keyEquivalent: "")
+        let sm = NSMenu()
+        for it in officeMenu.items where it.action != #selector(toggleOffice) {
+            let c = it.copy() as! NSMenuItem
+            if c.action == #selector(toggleNotify(_:)) { c.state = notifyOn ? .on : .off }
+            sm.addItem(c)
+        }
+        more.submenu = sm; m.addItem(more)
+        if office.boardUpdated > 0 { m.addItem(info("GitHub actualizado " + ago(now - office.boardUpdated), bold: false)) }
+    }
+
+    func section(_ m: NSMenu, _ title: String) {
+        m.addItem(.separator())
+        if #available(macOS 14.0, *) { m.addItem(.sectionHeader(title: title)) } else { m.addItem(info(title, bold: true)) }
+    }
+
+    func info(_ t: String, bold: Bool) -> NSMenuItem {
+        let it = NSMenuItem(title: t, action: nil, keyEquivalent: ""); it.isEnabled = false
+        if bold { it.attributedTitle = NSAttributedString(string: t, attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]) }
+        return it
+    }
+
+    /// A two-line row: title plus a grey subtitle. Rows stay enabled so the subtitle keeps its colour;
+    /// the ones without an action simply do nothing when clicked.
+    func row(_ title: String, sub: String?, symbol: String) -> NSMenuItem {
+        let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let s = NSMutableAttributedString(string: String(title.prefix(70)), attributes: [.font: NSFont.menuFont(ofSize: 13)])
+        if let sub = sub, !sub.isEmpty {
+            s.append(NSAttributedString(string: "\n" + String(sub.prefix(90)),
+                                        attributes: [.font: NSFont.menuFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        it.attributedTitle = s
+        it.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        return it
+    }
+
+    func prRow(_ b: BoardItem) -> NSMenuItem {
+        let sub = [b.repo ?? "", stageWord(b.stage), b.note ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+        let it = row("#\(b.number ?? 0) " + b.title, sub: sub, symbol: stageSymbol(b.stage))
+        if let u = b.url { it.representedObject = u; it.action = #selector(openURL(_:)); it.target = self }
+        return it
+    }
+
+    func stageWord(_ s: String) -> String {
+        switch s {
+        case "comments": return "comentarios por resolver"; case "ci_red": return "checks en rojo"
+        case "changes": return "piden cambios"; case "ci_running": return "checks corriendo"
+        case "approval": return "esperando aprobación"; case "ready": return "aprobado, listo para mezclar"
+        case "draft": return "borrador"; case "merged": return "mezclado"
+        case "working": return "en curso"; case "waiting": return "esperando"
+        default: return s
+        }
+    }
+
+    func stageSymbol(_ s: String) -> String {
+        switch s {
+        case "comments": return "text.bubble"; case "ci_red": return "xmark.octagon"; case "changes": return "pencil.circle"
+        case "ci_running": return "clock"; case "approval": return "person.badge.clock"; case "ready": return "checkmark.circle"
+        case "merged": return "checkmark.seal"; case "draft": return "doc"; case "working": return "hammer"
+        case "waiting": return "hourglass"; default: return "circle"
+        }
+    }
+
+    func actWord(_ a: Act) -> String {
+        switch a {
+        case .idle: return "en pausa"; case .think: return "pensando"; case .type: return "corriendo comandos"
+        case .read: return "leyendo"; case .write: return "editando"; case .delegate: return "delegando"
+        case .talk: return "hablando"; case .browse: return "en la web"; case .wait: return "esperando"; case .done: return "terminó"
+        }
+    }
+
+    /// Free + inactive + purgeable pages: roughly what macOS can hand out without swapping.
+    func availableMemoryGB() -> Double? {
+        var st = vm_statistics64()
+        var n = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let r = withUnsafeMutablePointer(to: &st) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(n)) { host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &n) }
+        }
+        guard r == KERN_SUCCESS else { return nil }
+        let pages = UInt64(st.free_count) + UInt64(st.inactive_count) + UInt64(st.purgeable_count)
+        return Double(pages) * Double(vm_kernel_page_size) / 1_073_741_824
+    }
+
+    @objc func openURL(_ s: NSMenuItem) {
+        if let u = s.representedObject as? String, let url = URL(string: u), url.scheme == "https" { NSWorkspace.shared.open(url) }
+    }
+
+    /// Brings forward the terminal you use (the first one running), where sessions ask and wait.
+    @objc func openTerminal() {
+        let ids = ["com.mitchellh.ghostty", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "com.github.wez.wezterm",
+                   "net.kovidgoyal.kitty", "com.apple.Terminal"]
+        let running = NSWorkspace.shared.runningApplications
+        if let app = ids.lazy.compactMap({ id in running.first { $0.bundleIdentifier == id } }).first { app.activate() }
+        else if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") { NSWorkspace.shared.open(u) }
+    }
+
+    @objc func refreshBoard() { runBoardScript() }
+
+    @objc func editTasks() {
+        let p = baseDir + "/tasks.json"
+        if !FileManager.default.fileExists(atPath: p) { FileManager.default.createFile(atPath: p, contents: Data("[]\n".utf8)) }
+        NSWorkspace.shared.open(URL(fileURLWithPath: p))
+    }
+
+    /// Asks first: a running container may belong to a test suite an agent is still using.
+    @objc func quitDocker() {
+        let a = NSAlert()
+        a.messageText = "¿Apagar Docker?"
+        let c = office.machines.containers
+        a.informativeText = c.isEmpty ? "No hay contenedores corriendo."
+            : "Hay contenedores corriendo (\(c.joined(separator: ", "))). Si un agente los está usando, sus pruebas van a fallar."
+        a.addButton(withTitle: "Apagar"); a.addButton(withTitle: "Cancelar")
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        DispatchQueue.global(qos: .utility).async {
+            _ = run("/usr/bin/osascript", ["-e", "quit app \"Docker\""], timeout: 20)
+            DispatchQueue.main.async { self.pollMachines() }
+        }
     }
 
     func updateBadge() {
