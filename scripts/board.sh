@@ -7,7 +7,7 @@ D="${AGENT_OFFICE_DIR:-$HOME/agent-office}"; mkdir -p "$D"
 command -v gh >/dev/null || exit 0
 # Optional $D/board.conf (shell):
 #   BOARD_QUERY="base:develop"           extra GitHub search qualifiers
-#   BOARD_TITLE_REGEX="MON-14(29|3[0-8])"  keep only titles that match
+#   BOARD_TITLE_REGEX="PROJ-(12|13)[0-9]"  keep only titles that match
 BOARD_QUERY=""; BOARD_TITLE_REGEX=""
 [ -f "$D/board.conf" ] && . "$D/board.conf"
 since=$(date -u -v-1d +%Y-%m-%d 2>/dev/null || date -u -d '1 day ago' +%Y-%m-%d)

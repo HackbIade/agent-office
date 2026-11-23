@@ -251,7 +251,7 @@ final class OfficeView: NSView {
             px(bx + 8, y + 1, 2, rowH - 3, blink ? 0xFFFFFF : col)
             px(bx + 11 + (i * 7) % (W - bx - 30), y - 1, 2, 1, 0xD64F4F)
             let id = it.number.map { "#\($0) " } ?? ""
-            let repo = (it.repo ?? "").replacingOccurrences(of: "treinta-", with: "")
+            let repo = it.repo ?? ""
             let title = it.title.replacingOccurrences(of: #"^\w+\(([A-Z]+-\d+)\): "#, with: "$1 ", options: .regularExpression)
             textL(id + title, bx + 12, y, size: 6.5, col: 0x2E3247, bold: true, maxW: W - bx - 20)
             textL(label + (it.note.map { $0.isEmpty ? "" : " · " + $0 } ?? "") + (repo.isEmpty ? "" : "  " + repo), bx + 12, y + 3, size: 6, col: col == 0xB0B6C8 ? 0x6B7088 : col, maxW: W - bx - 20)
