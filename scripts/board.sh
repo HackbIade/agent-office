@@ -1,6 +1,7 @@
 #!/bin/bash
 # Writes $AGENT_OFFICE_DIR/board.json: your open pull requests (and the ones merged in the last
-# 24 h) with the stage each one is in. Needs the GitHub CLI (gh) logged in. Extra rows can be
+# 24 h) with the stage each one is in, plus "yours": pull requests waiting for your review and
+# open issues assigned to you. Needs the GitHub CLI (gh) logged in. Extra rows can be
 # added by hand in $AGENT_OFFICE_DIR/tasks.json: [{"title":"...","stage":"waiting","note":"..."}].
 set -uo pipefail
 D="${AGENT_OFFICE_DIR:-$HOME/agent-office}"; mkdir -p "$D"
@@ -16,8 +17,23 @@ Q='query($q:String!){search(query:$q,type:ISSUE,first:30){nodes{... on PullReque
   commits(last:1){nodes{commit{statusCheckRollup{state}}}}
   reviewThreads(first:100){nodes{isResolved}}}}}}'
 fetch() { gh api graphql -f query="$Q" -f q="$1" 2>/dev/null || echo '{"data":{"search":{"nodes":[]}}}'; }
+# What waits for you (board.conf filters do not apply here): review requests and assigned issues,
+# with the time you were asked. One call; if it fails, "yours" keeps the previous list.
+YQ='query{
+  prs: search(query:"is:pr is:open review-requested:@me archived:false sort:created-asc",type:ISSUE,first:20){nodes{... on PullRequest{
+    number title url createdAt repository{name}
+    timelineItems(itemTypes:[REVIEW_REQUESTED_EVENT],last:1){nodes{... on ReviewRequestedEvent{createdAt}}}}}}
+  issues: search(query:"is:issue is:open assignee:@me archived:false sort:created-asc",type:ISSUE,first:20){nodes{... on Issue{
+    number title url createdAt repository{name}
+    timelineItems(itemTypes:[ASSIGNED_EVENT],last:1){nodes{... on AssignedEvent{createdAt}}}}}}}'
+yours=$(gh api graphql -f query="$YQ" 2>/dev/null | jq -c '
+  def row($k): select(.number != null) | {kind: $k, repo: .repository.name, number, title, url,
+    since: ((.timelineItems.nodes[0].createdAt // .createdAt) | fromdateiso8601)};
+  [(.data.prs.nodes[] | row("pr")), (.data.issues.nodes[] | row("issue"))]' 2>/dev/null) ||
+  yours=$(jq -c '.yours // []' "$D/board.json" 2>/dev/null || echo '[]')
+[ -n "$yours" ] || yours='[]'
 { fetch "is:pr author:@me is:open archived:false $BOARD_QUERY sort:updated-desc"; fetch "is:pr author:@me is:merged merged:>=$since $BOARD_QUERY sort:updated-desc"; } |
-jq -s --arg re "$BOARD_TITLE_REGEX" --slurpfile tasks <( [ -f "$D/tasks.json" ] && cat "$D/tasks.json" || echo '[]' ) '
+jq -s --arg re "$BOARD_TITLE_REGEX" --argjson yours "$yours" --slurpfile tasks <( [ -f "$D/tasks.json" ] && cat "$D/tasks.json" || echo '[]' ) '
   [ .[].data.search.nodes[] | select(.number != null) | select($re == "" or (.title | test($re))) |
     (.commits.nodes[0].commit.statusCheckRollup.state // "") as $ci |
     ([.reviewThreads.nodes[] | select(.isResolved | not)] | length) as $open |
@@ -34,4 +50,4 @@ jq -s --arg re "$BOARD_TITLE_REGEX" --slurpfile tasks <( [ -f "$D/tasks.json" ] 
   | unique_by(.repo, .number)
   | sort_by({comments:0, ci_red:1, changes:2, ci_running:3, approval:4, ready:5, draft:6, merged:9}[.stage] // 5)
   | . + ($tasks[0] // [])
-  | {updated: now | floor, items: .}' > "$D/board.json.tmp" && mv "$D/board.json.tmp" "$D/board.json"
+  | {updated: now | floor, items: ., yours: $yours}' > "$D/board.json.tmp" && mv "$D/board.json.tmp" "$D/board.json"

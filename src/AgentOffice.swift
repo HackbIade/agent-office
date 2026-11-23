@@ -15,7 +15,25 @@ struct Ev: Decodable {
 }
 
 struct BoardItem: Decodable { let repo: String?; let number: Int?; let title: String; let stage: String; let note: String? }
-struct Board: Decodable { let updated: Double?; let items: [BoardItem] }
+/// Something on GitHub waiting for you: a review request (kind "pr") or an assigned issue ("issue").
+struct YourItem: Decodable { let kind: String; let repo: String?; let number: Int?; let title: String; let url: String?; let since: Double? }
+struct Board: Decodable { let updated: Double?; let items: [BoardItem]; let yours: [YourItem]? }
+
+/// Why a session is waiting for you: its turn ended, it asks for a permission, or it asked a question.
+enum WaitKind { case done, perm, ask }
+struct Wait { var kind: WaitKind; var since: Double; var proj: String; var aid: String; var detail: String }
+
+/// One row of the "Tu turno" panel.
+struct Turn { let key: String; let kind: String; let title: String; let sub: String; let since: Double; let url: String? }
+
+/// "hace 4 min", "hace 2 h"...
+func ago(_ secs: Double) -> String {
+    let s = max(0, Int(secs))
+    if s < 60 { return "ahora" }
+    if s < 3600 { return "hace \(s / 60) min" }
+    if s < 86400 { return "hace \(s / 3600) h" }
+    return "hace \(s / 86400) d"
+}
 
 enum Act { case idle, think, type, read, write, delegate, talk, browse, wait, done }
 
@@ -93,6 +111,12 @@ final class Office {
     var agents: [String: Agent] = [:]
     var pendingDesc: [String: [String]] = [:]
     var board: [BoardItem] = []
+    var yours: [YourItem] = []
+    var boardUpdated = 0.0
+    /// Sessions waiting for you, by session id. Kept for up to `waitMax` even after the robot leaves.
+    var waits: [String: Wait] = [:]
+    var turns: [Turn] = []
+    let waitMax = 8 * 3600.0
     var machines = Machines()
     let slots = 6
     /// Live events use the wall clock for arrivals and departures: hook times are whole seconds,
@@ -120,7 +144,73 @@ final class Office {
         a.slot = -1
     }
 
+    /// Tracks when a session needs you. Only the main session's Stop counts as "your turn"
+    /// (subagent stops are for the lead to handle).
+    func track(_ e: Ev) {
+        let sid = e.sid
+        guard !sid.isEmpty else { return }
+        let lead = e.aid.isEmpty
+        switch e.ev {
+        case "SessionEnd", "UserPromptSubmit": waits[sid] = nil
+        case "Stop": if lead { waits[sid] = Wait(kind: .done, since: e.t, proj: e.proj, aid: "", detail: "") }
+        case "Notification":
+            switch e.ntype {
+            case "idle_prompt":
+                if waits[sid] == nil { waits[sid] = Wait(kind: .done, since: e.t, proj: e.proj, aid: "", detail: "") }
+            case "elicitation_dialog":
+                waits[sid] = Wait(kind: .ask, since: e.t, proj: e.proj, aid: e.aid, detail: e.d)
+            case "permission_prompt", "":
+                guard e.ntype != "" || e.d.lowercased().contains("permission") else { break }
+                // AskUserQuestion also raises a permission prompt: keep it as a question.
+                if let w = waits[sid], w.kind == .ask, w.aid == e.aid { break }
+                waits[sid] = Wait(kind: .perm, since: e.t, proj: e.proj, aid: e.aid, detail: e.d)
+            default: break
+            }
+        case "PreToolUse" where e.tool == "AskUserQuestion":
+            waits[sid] = Wait(kind: .ask, since: e.t, proj: e.proj, aid: e.aid, detail: e.d)
+        case "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop":
+            guard let w = waits[sid] else { break }
+            // A permission or a question is answered when that same agent moves on. A finished turn
+            // ends when the main session starts working again (a background task woke it up).
+            if w.kind != .done ? w.aid == e.aid : (lead && e.ev == "PreToolUse") { waits[sid] = nil }
+        default: break
+        }
+    }
+
+    /// The lead's turn ended and it waits for your instructions.
+    func turnWait(_ a: Agent) -> Wait? {
+        guard a.kind == "lead", a.leaving == nil, let w = waits[String(a.id.dropFirst(2))], w.kind == .done else { return nil }
+        return w
+    }
+
+    /// Everything that needs you, oldest first.
+    func computeTurns() -> [Turn] {
+        var out: [Turn] = []
+        for (sid, w) in waits {
+            let key = "s:\(sid):\(w.kind):\(Int(w.since))"
+            switch w.kind {
+            case .done:
+                out.append(Turn(key: key, kind: "done", title: "Sesión \(w.proj) terminó", sub: "esperando tus instrucciones", since: w.since, url: nil))
+            case .perm:
+                var sub = "apruébalo en la terminal"
+                if let r = w.detail.range(of: #"to use \S+"#, options: .regularExpression) { sub = "quiere usar " + w.detail[r].dropFirst(7) }
+                out.append(Turn(key: key, kind: "perm", title: "Sesión \(w.proj) te pide permiso", sub: sub, since: w.since, url: nil))
+            case .ask:
+                out.append(Turn(key: key, kind: "ask", title: "Sesión \(w.proj) te hizo una pregunta", sub: w.detail.isEmpty ? "responde en la terminal" : w.detail, since: w.since, url: nil))
+            }
+        }
+        for y in yours {
+            let n = y.number.map { "#\($0) " } ?? ""
+            let repo = y.repo.map { " · " + $0 } ?? ""
+            let pr = y.kind == "pr"
+            out.append(Turn(key: "\(y.kind):\(y.repo ?? "")\(n)", kind: pr ? "pr" : "issue", title: n + y.title,
+                            sub: (pr ? "revisar PR" : "issue asignado") + repo, since: y.since ?? boardUpdated, url: y.url))
+        }
+        return out.sorted { $0.since != $1.since ? $0.since < $1.since : $0.key < $1.key }
+    }
+
     func handle(_ e: Ev) {
+        track(e)
         let target: Agent = e.aid.isEmpty ? session(e) : sub(e)
         target.last = e.t
         switch e.ev {
@@ -144,8 +234,9 @@ final class Office {
             }
         case "SubagentStop": target.act = .done; target.detail = "terminó"; target.leaving = clock(e)
         case "Notification":
-            target.act = .wait
-            target.detail = e.ntype == "idle_prompt" ? "esperando tu mensaje" : "necesita tu permiso"
+            // "Waiting for your input" after a finished turn is your turn, not a permission (no red "!").
+            if e.ntype == "idle_prompt" { if target.act != .wait { target.act = .idle; target.detail = "listo, esperando" } }
+            else { target.act = .wait; target.detail = "necesita tu permiso" }
         case "Stop": if e.aid.isEmpty { target.act = .idle; target.detail = "listo, esperando" }
         case "PreCompact": target.act = .think; target.detail = "ordenando su memoria"
         default: break
@@ -156,8 +247,11 @@ final class Office {
         for (k, a) in agents {
             if let l = a.leaving, now - l > leaveTotal { agents.removeValue(forKey: k); continue }
             let quiet = now - a.last
+            // A lead whose turn ended stays at its desk while it waits for you.
+            if turnWait(a) != nil { continue }
             if a.kind == "lead" ? quiet > 1800 : quiet > 1200 { agents.removeValue(forKey: k) }
         }
+        for (sid, w) in waits where now - w.since > waitMax { waits[sid] = nil }
         for a in agents.values where a.slot < 0 { assign(a) }
     }
 
@@ -190,14 +284,22 @@ final class Feed {
         let data = h.readDataToEndOfFile()
         guard let lastNL = data.lastIndex(of: 10) else { return false }
         offset += UInt64(lastNL + 1)
-        let cutoff = Date().timeIntervalSince1970 - 1800
+        let now = Date().timeIntervalSince1970
+        let cutoff = now - 1800, waitCutoff = now - o.waitMax
         o.live = !replay
         for line in data[..<lastNL].split(separator: 10) {
             guard let e = try? dec.decode(Ev.self, from: Data(line)) else { continue }
-            if replay && e.t < cutoff { continue }
+            if replay && e.t < cutoff { if e.t >= waitCutoff { o.track(e) }; continue }
             o.handle(e)
         }
-        if replay { for a in o.agents.values { a.born = 0 } }
+        if replay {
+            // A session that is still waiting for you gets its robot back at its desk.
+            for (sid, w) in o.waits where w.kind == .done && o.agents["s:" + sid] == nil {
+                let a = Agent(id: "s:" + sid, name: "Líder · " + w.proj, kind: "lead", now: w.since)
+                a.act = .idle; a.detail = "listo, esperando"; o.agents[a.id] = a; o.assign(a)
+            }
+            for a in o.agents.values { a.born = 0 }
+        }
         return true
     }
 }
@@ -683,7 +785,17 @@ final class OfficeView: NSView {
     init(office: Office) { self.office = office; super.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
-    override func mouseDown(with e: NSEvent) { window?.performDrag(with: e) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with e: NSEvent) {
+        // Pull request and issue rows of the "Tu turno" sign open in the browser; anything else drags.
+        let p = convert(e.locationInWindow, from: nil)
+        let at = CGPoint(x: p.x / P, y: p.y / P)
+        if let hit = turnRects.first(where: { $0.0.contains(at) }) {
+            if let url = URL(string: hit.1), url.scheme == "https" { NSWorkspace.shared.open(url) }
+            return
+        }
+        window?.performDrag(with: e)
+    }
 
     func font(_ size: CGFloat, _ bold: Bool) -> NSFont {
         let key = "\(size)-\(bold)"
@@ -693,12 +805,17 @@ final class OfficeView: NSView {
 
     static let center: NSParagraphStyle = { let p = NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail; p.alignment = .center; return p }()
     static let left: NSParagraphStyle = { let p = NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail; return p }()
+    static let right: NSParagraphStyle = { let p = NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail; p.alignment = .right; return p }()
+
+    /// Text that must stay readable at the small size grows a little there.
+    var big: CGFloat { P <= 2 ? 1.25 : 1 }
 
     /// Text at art coordinates. `size` is in points at the medium size (P = 3).
-    func text(_ s: String, _ x: Int, _ y: Double, _ w: Int, size: CGFloat, col: UInt32, bold: Bool = false, left: Bool = false) {
+    func text(_ s: String, _ x: Int, _ y: Double, _ w: Int, size: CGFloat, col: UInt32, bold: Bool = false, left: Bool = false, right: Bool = false) {
         guard stat else { return }
         let pt = size * P / 3
-        let a: [NSAttributedString.Key: Any] = [.font: font(pt, bold), .foregroundColor: ns(col), .paragraphStyle: left ? OfficeView.left : OfficeView.center]
+        let a: [NSAttributedString.Key: Any] = [.font: font(pt, bold), .foregroundColor: ns(col),
+                                                .paragraphStyle: right ? OfficeView.right : (left ? OfficeView.left : OfficeView.center)]
         (s as NSString).draw(in: NSRect(x: CGFloat(x) * P, y: CGFloat(y) * P, width: CGFloat(w) * P, height: pt + 4), withAttributes: a)
     }
 
@@ -744,11 +861,19 @@ final class OfficeView: NSView {
         return c
     }
 
+    /// The lead's "¡tu turno!" sign: how long it has waited, or nil when it is not seated waiting for you.
+    func turnSign(_ a: Agent, now: Double) -> String? {
+        guard a.act == .idle, let w = office.turnWait(a), case .seated = agentPose(a, now: now) else { return nil }
+        return ago(now - w.since)
+    }
+
     func signature(_ s: Sky) -> String {
+        let now = Date().timeIntervalSince1970
         var sig = "\(s.key)|\(OfficeView.df.string(from: Date()))|"
         for slot in 0..<6 {
-            if let a = office.agents.values.first(where: { $0.slot == slot }) { sig += "\(a.name)|\(a.detail)|\(a.act == .wait)|\(a.act == .idle)|\(a.leaving != nil)|" } else { sig += "-|" }
+            if let a = office.agents.values.first(where: { $0.slot == slot }) { sig += "\(a.name)|\(a.detail)|\(a.act == .wait)|\(a.act == .idle)|\(a.leaving != nil)|\(turnSign(a, now: now) ?? "")|" } else { sig += "-|" }
         }
+        for t in office.turns { sig += "\(t.key)\(t.title)\(t.sub)\(ago(now - t.since))|" }
         sig += "\(office.agents.values.filter { $0.slot < 0 }.count)|"
         let m = office.machines
         sig += "\(m.docker)\(m.dockerStuck)\(m.containers)\(m.devices.map { $0.name + ($0.link ?? "") + $0.kind })\(m.servers.map { "\($0.port)\($0.kind)" })\(m.watchers)|"
@@ -803,8 +928,15 @@ final class OfficeView: NSView {
     func drawStaticText() {
         let present = office.agents.values.filter { $0.leaving == nil }
         let active = present.filter { $0.act != .idle }.count
+        let now = Date().timeIntervalSince1970
         text("OFICINA DE AGENTES", 45, 7.5, 52, size: 7.5, col: cream, bold: true)
-        text("\(present.count) aquí · \(active) trabajando", 45, 12.8, 52, size: 6, col: 0xA9AEC4)
+        if !office.turns.isEmpty {
+            // Count badge, readable even at the small size.
+            px(49, 12, 44, 7, 0x9E2F2F); px(49, 12, 44, 1, 0xC9524A)
+            text("Tu turno: \(office.turns.count)", 45, 12.5, 52, size: 6.6 * big, col: 0xFFE58A, bold: true)
+        } else {
+            text("\(present.count) aquí · \(active) trabajando", 45, 12.8, 52, size: 6, col: 0xA9AEC4)
+        }
         text(OfficeView.df.string(from: Date()), 101, 8.6, 16, size: 6.5, col: green, bold: true)
         // Name tags (walkers pass in front of them).
         for slot in 0..<6 {
@@ -814,7 +946,19 @@ final class OfficeView: NSView {
                 let nw = min(44, textWidth(a.name, size: 7.5, bold: true) + 4)
                 px(dx + 17 - nw / 2, dy + 18, nw, 4, 0x1B1F2C, 0.55)
                 text(a.name, dx - 5, Double(dy) + 18.2, 44, size: 7.5, col: col, bold: true)
-                text(a.detail, dx - 5, Double(dy) + 22.4, 44, size: 6, col: a.act == .wait ? gold : 0xD5D9E6)
+                if let w = office.turnWait(a), a.act == .idle {
+                    text("tu turno · " + ago(now - w.since), dx - 5, Double(dy) + 22.4, 44, size: 6, col: gold, bold: true)
+                } else {
+                    text(a.detail, dx - 5, Double(dy) + 22.4, 44, size: 6, col: a.act == .wait ? gold : 0xD5D9E6)
+                }
+                // The lead holds up a "¡tu turno!" sign with the minutes it has waited.
+                if let age = turnSign(a, now: now) {
+                    let sx = dx - 4, sy = dy - 27
+                    px(sx + 1, sy + 1, 24, 9, 0x000000, 0.3)
+                    px(sx, sy, 24, 9, 0x5A3A1A); px(sx + 1, sy + 1, 22, 7, 0xFFE58A); px(sx + 1, sy + 1, 22, 1, 0xFFF4C4)
+                    text("¡TU TURNO!", sx, Double(sy) + 0.9, 24, size: 6.2 * big, col: 0x9E2F2F, bold: true)
+                    text(age, sx, Double(sy) + 4.5, 24, size: 5.4 * big, col: 0x5A3A1A, bold: true)
+                }
             } else {
                 text("libre", dx - 5, Double(dy) + 19, 44, size: 6.5, col: 0x6B7590)
             }
@@ -845,6 +989,11 @@ final class OfficeView: NSView {
             let (dx, dy) = deskOrigin(slot)
             let k: CGFloat = (f / 3) % 2 == 0 ? 0.30 : 0.16
             px(dx - 3, dy - 24, 40, 42, 0xF25C54, k * 0.5); px(dx - 1, dy - 22, 36, 39, 0xF25C54, k * 0.5)
+        }
+        for (slot, a) in seated where a.act == .idle && office.turnWait(a) != nil {
+            let (dx, dy) = deskOrigin(slot)
+            let k: CGFloat = (f / 3) % 2 == 0 ? 0.26 : 0.14
+            px(dx - 3, dy - 24, 40, 42, gold, k * 0.5); px(dx - 1, dy - 22, 36, 39, gold, k * 0.5)
         }
         // Painter's order: anything whose feet are higher up is drawn first.
         var items: [(key: Int, order: Int, slot: Int, agent: Agent?, x: Int, y: Int, walking: Bool)] = []
@@ -902,6 +1051,16 @@ final class OfficeView: NSView {
         monitor(dx + 21, dy - 9, a.act, f + slot * 3)
         let col = kindColor[a.kind] ?? 0xB0B6C8
         let x = dx + 5
+        if a.act == .idle, office.turnWait(a) != nil {
+            // Raised arm holding the "¡tu turno!" sign (drawn in the room layer), the other hand on the desk.
+            let sx = dx - 4, sy = dy - 27
+            px(dx + 4, sy + 9, 1, 2, 0x7A5238)
+            px(dx + 3, dy - 16, 3, 2, shade(col, 0.2)); px(dx + 3, dy - 14, 2, 11, col); px(dx + 4, dy - 14, 1, 11, shade(col, -0.25))
+            px(x + 10, dy, 2, 3, col)
+            let edge: UInt32 = (f / 3) % 2 == 0 ? 0xFF8A3D : gold
+            px(sx - 1, sy - 1, 26, 1, edge); px(sx - 1, sy + 9, 26, 1, edge); px(sx - 1, sy, 1, 9, edge); px(sx + 24, sy, 1, 9, edge)
+            return
+        }
         switch a.act {
         case .type, .write, .delegate:
             let bob = (f / 2) % 2
@@ -1088,14 +1247,73 @@ final class OfficeView: NSView {
         "draft": ("borrador", 0x8A8FA3), "merged": ("mezclado", 0x4F8F5F), "waiting": ("esperando", 0xB060C8), "working": ("en curso", 0x4F8FE0),
     ]
 
-    /// Cork board with the pull requests and tasks from board.json.
+    static let turnColors: [String: UInt32] = ["done": 0xC8801A, "perm": 0xD64F4F, "ask": 0x9B4FC8, "pr": 0x3D86C6, "issue": 0x2F9E5A]
+    /// Clickable rows of the "Tu turno" sign, in art pixels, with the URL they open.
+    var turnRects: [(CGRect, String)] = []
+
+    /// A small bell: still and grey when nothing waits, ringing in gold otherwise.
+    func bell(_ x: Int, _ y: Int, ringing: Bool, f: Int) {
+        if ringing == stat { return }   // the still bell lives in the room layer, the ringing one in the sprites
+        let sw = ringing ? ((f / 3) % 2 == 0 ? -1 : 1) : 0
+        let c: UInt32 = ringing ? gold : 0x9AA0B4
+        px(x + 2 + sw, y - 1, 1, 1, c); px(x + 1 + sw, y, 3, 3, c); px(x + sw, y + 3, 5, 1, c)
+        px(x + 2, y + 4, 1, 1, ringing ? 0xFFF1D0 : c)
+        if ringing && (f / 3) % 2 == 0 { px(x - 2, y, 1, 3, 0xFFF1D0); px(x + 6, y, 1, 3, 0xFFF1D0) }
+    }
+
+    /// "Tu turno" sign on top of the board: everything that needs you, oldest first, with how long it
+    /// has waited. Returns the first free row below it.
+    func drawTurns(_ f: Int) -> Int {
+        let bx = 216, bw = 74, ts = office.turns, on = !ts.isEmpty
+        let now = Date().timeIntervalSince1970
+        if stat {
+            turnRects = []
+            px(bx + 2, 6, bw - 3, 10, 0x000000, 0.25)
+            px(bx + 1, 5, bw - 3, 10, on ? 0x9E2F2F : 0x4A4F60); px(bx + 1, 5, bw - 3, 1, on ? 0xC9524A : 0x5E6478); px(bx + 1, 14, bw - 3, 1, on ? 0x7A2020 : 0x3A3F4E)
+        }
+        text("TU TURNO", bx + 13, 6.4, 40, size: 8 * big, col: on ? 0xFFF1D0 : 0xC3C8D6, bold: true, left: true)
+        if on {
+            if stat { px(bx + bw - 14, 6, 11, 8, gold); px(bx + bw - 14, 6, 11, 1, 0xFFE08A) }
+            text("\(ts.count)", bx + bw - 14, 7.0, 11, size: 8 * big, col: 0x3A2A1C, bold: true)
+        } else {
+            text("nada pendiente", bx + 36, 7.9, bw - 40, size: 5.6 * big, col: 0xC3C8D6, right: true)
+        }
+        bell(bx + 3, 7, ringing: on, f: f)
+        guard on else { return 16 }
+        let rowH = 11, top = 17, maxRows = 5
+        let rows = ts.count > maxRows ? maxRows - 1 : ts.count
+        for (i, t) in ts.prefix(rows).enumerated() {
+            let y = top + i * rowH
+            let col = OfficeView.turnColors[t.kind] ?? 0x7A8094
+            if !stat {
+                // Permissions and questions block a session: their tab blinks.
+                if t.kind == "perm" || t.kind == "ask" { px(bx + 2, y, 2, rowH - 1, (f / 3) % 2 == 0 ? 0xFF3030 : col) }
+                continue
+            }
+            px(bx + 3, y + 1, bw - 5, rowH - 1, 0x000000, 0.2)
+            px(bx + 2, y, bw - 5, rowH - 1, 0xFFF3C4); px(bx + 2, y, bw - 5, 1, 0xFFF9E0)
+            px(bx + 2, y, 2, rowH - 1, col)
+            let age = ago(now - t.since)
+            let aw = textWidth(age, size: 5.4 * big, bold: false) + 1
+            text(t.title, bx + 6, Double(y) + 0.6, bw - 11 - aw, size: 6.4 * big, col: 0x2E3247, bold: true, left: true)
+            text(age, bx + bw - 5 - aw, Double(y) + 1.0, aw, size: 5.4 * big, col: 0x7A6A50, right: true)
+            text(t.sub + (t.url != nil ? "  ›" : ""), bx + 6, Double(y) + 5.3, bw - 11, size: 5.8 * big, col: shade(col, -0.25), left: true)
+            if let u = t.url { turnRects.append((CGRect(x: bx + 2, y: y, width: bw - 5, height: rowH - 1), u)) }
+        }
+        var end = top + rows * rowH
+        if ts.count > rows { text("+\(ts.count - rows) más", bx, Double(end) - 0.4, bw, size: 6 * big, col: 0x3A2A1C, bold: true); end += 6 }
+        return end + 1
+    }
+
+    /// Cork board: the "Tu turno" sign, then the pull requests and tasks from board.json.
     func drawBoard(_ f: Int) {
         let bx = 216, bw = 74
-        if stat { px(236, 6, 34, 8, cream); px(236, 14, 34, 1, 0x000000, 0.2); px(252, 6, 2, 2, red) }
-        text("PIZARRA", 236, 7.6, 34, size: 7.5, col: 0x3A2A1C, bold: true)
+        let ph = drawTurns(f) + 2
+        if stat { px(236, ph, 34, 8, cream); px(236, ph + 8, 34, 1, 0x000000, 0.2); px(252, ph, 2, 2, red) }
+        text("PIZARRA", 236, Double(ph) + 1.6, 34, size: 7.5, col: 0x3A2A1C, bold: true)
         let items = office.board
-        if items.isEmpty { text("sin PRs ni tareas", bx, 22, bw, size: 6.5, col: 0x5A4A3A); return }
-        let rowH = 8, top = 18, maxRows = (H - top - 8) / rowH
+        if items.isEmpty { text("sin PRs ni tareas", bx, Double(ph) + 14, bw, size: 6.5, col: 0x5A4A3A); return }
+        let rowH = 8, top = ph + 12, maxRows = max(1, (H - top - 8) / rowH)
         let rows = items.count > maxRows ? maxRows - 1 : maxRows
         for (i, it) in items.prefix(rows).enumerated() {
             let y = top + i * rowH
@@ -1131,6 +1349,9 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         _ = feed.read(into: office, replay: true)
+        // What already waited before the app opened is shown, not announced.
+        office.turns = office.computeTurns()
+        notified.formUnion(office.turns.map { $0.key })
         view = OfficeView(office: office)
         var scale = CGFloat(UserDefaults.standard.double(forKey: "scale").nonZero ?? 3)
         if ![2, 3, 4].contains(scale) { scale = 3 }
@@ -1155,6 +1376,9 @@ final class App: NSObject, NSApplicationDelegate {
         for (t, s) in [("Pequeño", 2.0), ("Mediano", 3.0), ("Grande", 4.0)] {
             let it = NSMenuItem(title: t, action: #selector(resize(_:)), keyEquivalent: ""); it.target = self; it.tag = Int(s); menu.addItem(it)
         }
+        menu.addItem(.separator())
+        let n = NSMenuItem(title: "Avisos con sonido", action: #selector(toggleNotify(_:)), keyEquivalent: "")
+        n.target = self; n.state = notifyOn ? .on : .off; menu.addItem(n)
         menu.addItem(.separator())
         let q = NSMenuItem(title: "Cerrar la oficina", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); menu.addItem(q)
         view.menu = menu
@@ -1187,6 +1411,8 @@ final class App: NSObject, NSApplicationDelegate {
         if now - lastBoardRun > 120 { runBoardScript() }
         if now - lastProbe > 10 { pollMachines() }
         office.prune(now: now)
+        office.turns = office.computeTurns()
+        announce()
         view.frameNo += rate < 0.5 ? 1 : 6
         if panel.occlusionState.contains(.visible) { view.render() }
         snapshotIfRequested()
@@ -1201,6 +1427,54 @@ final class App: NSObject, NSApplicationDelegate {
         guard let d = FileManager.default.contents(atPath: baseDir + "/board.json"),
               let b = try? JSONDecoder().decode(Board.self, from: d) else { return }
         office.board = b.items
+        office.boardUpdated = b.updated ?? 0
+        if let y = b.yours {
+            office.yours = y
+            // The first GitHub list after launch is the baseline: only later arrivals are announced.
+            if !boardSeen { boardSeen = true; notified.formUnion(office.computeTurns().filter { $0.url != nil || $0.kind == "pr" || $0.kind == "issue" }.map { $0.key }) }
+        }
+    }
+
+    // MARK: Notifications
+
+    var notified = Set<String>()
+    var pendingNotes: [String] = []
+    var noteScheduled = false
+    var boardSeen = false
+    var notifyOn: Bool { UserDefaults.standard.object(forKey: "notify") as? Bool ?? true }
+
+    @objc func toggleNotify(_ s: NSMenuItem) {
+        let v = !notifyOn; UserDefaults.standard.set(v, forKey: "notify"); s.state = v ? .on : .off
+    }
+
+    /// Each item is announced once, when it enters the list. Items that arrive within 5 s go out
+    /// together, and the ones already solved by then are dropped.
+    func announce() {
+        for t in office.turns where !notified.contains(t.key) { notified.insert(t.key); pendingNotes.append(t.key) }
+        guard !pendingNotes.isEmpty, !noteScheduled else { return }
+        noteScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.flushNotes() }
+    }
+
+    func flushNotes() {
+        noteScheduled = false
+        let keys = Set(pendingNotes); pendingNotes = []
+        let ts = office.turns.filter { keys.contains($0.key) }
+        guard notifyOn, !ts.isEmpty else { return }
+        let title = ts.count == 1 ? "Tu turno" : "Tu turno: \(ts.count) cosas"
+        let body = ts.count == 1 ? ts[0].title + " · " + ts[0].sub : ts.map { $0.title }.joined(separator: " · ")
+        func esc(_ s: String) -> String { s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") }
+        let script = "display notification \"\(esc(String(body.prefix(220))))\" with title \"Agent Office\" subtitle \"\(esc(title))\" sound name \"Glass\""
+        let log = env["AGENT_OFFICE_NOTIFY_LOG"]
+        DispatchQueue.global(qos: .utility).async {
+            if let log = log {   // demos and tests: write the notification instead of showing it
+                let line = Data((script + "\n").utf8)
+                if let h = FileHandle(forWritingAtPath: log) { h.seekToEndOfFile(); h.write(line); try? h.close() }
+                else { FileManager.default.createFile(atPath: log, contents: line) }
+                return
+            }
+            _ = run("/usr/bin/osascript", ["-e", script], timeout: 5)
+        }
     }
 
     /// board.sh calls the GitHub CLI, so it runs off the main thread and at most every 2 minutes.
