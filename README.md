@@ -37,6 +37,23 @@ that is running, and on the right wall a **cork board** with your pull requests.
   | **Needs you** (permission prompt, question) | blinking `!` | red `!` bubble, raised hand, the desk glows |
   | Idle (turn finished) | screensaver | mug of coffee |
 
+- **Your turn (Tu turno):** a red sign on top of the board lists everything that waits for
+  you, oldest first, with how long it has waited ("hace 4 min"), and its bell rings while
+  the list is not empty. The title plaque shows the count ("Tu turno: 2") so you can read it
+  even at the small size.
+  - A session that **finished its turn** and waits for your instructions (subagent stops
+    do not count: the lead handles those). It clears when you write to it again.
+  - A session that **asks for a permission** or **asked you a question**. It clears as soon
+    as the session moves on.
+  - On GitHub: pull requests where **your review is requested** and open **issues assigned
+    to you** (for example a manual workflow approval). Click one of these rows to open it
+    in the browser.
+  - The lead whose turn ended raises its hand with a **"¡tu turno!"** sign and the minutes
+    it has waited, and its desk glows gold (a permission keeps the red `!`).
+  - **Avisos con sonido** (right-click menu, on by default): a macOS notification with a
+    sound when something enters the list. Each item is announced once, items that arrive
+    within 5 s go out together, and nothing is announced for what was already waiting when
+    the office opened.
 - **Machine room** (checked every ~10 s in the background; each probe is skipped when its
   tool is missing):
   - **Docker:** while Docker Desktop is open, a rack with one blinking light per running
@@ -77,8 +94,8 @@ The installer:
 New Claude Code sessions report to the office right away. In a session that was already
 open, run `/hooks` once so it reloads the settings.
 
-**Using it:** drag it anywhere. Right-click for small, medium or large size, or to close
-it. Reopen it with `open ~/agent-office/AgentOffice.app`.
+**Using it:** drag it anywhere. Right-click for small, medium or large size, to turn the
+sound notifications on or off, or to close it. Reopen it with `open ~/agent-office/AgentOffice.app`.
 
 ## Uninstall
 
@@ -113,13 +130,18 @@ Everything stays on your Mac: no network, no telemetry.
 ### Board
 
 `board.sh` runs every 2 minutes in the background through the GitHub CLI (`gh`, logged
-in). It makes two search queries and writes `board.json`. Without `gh` the board stays
+in). It makes three GraphQL calls (your open and recently merged pull requests, and one for
+review requests plus assigned issues) and writes `board.json`, with the "Tu turno" items
+under `yours`. Without `gh` the board stays
 empty. To narrow it, create `~/agent-office/board.conf`:
 
 ```bash
 BOARD_QUERY="base:develop"              # extra GitHub search qualifiers
 BOARD_TITLE_REGEX="PROJ-(12|13)[0-9]"   # keep only matching titles
 ```
+
+These filters apply only to your own pull requests: review requests and assigned issues
+always show up in "Tu turno".
 
 Rows that are not pull requests (a pending decision, tickets not started) go in
 `~/agent-office/tasks.json`:
@@ -137,6 +159,8 @@ Stages: `comments`, `ci_red`, `changes`, `ci_running`, `approval`, `ready`, `dra
   Set it before `./install.sh`.
 - To export the current frame as an image, touch `$AGENT_OFFICE_DIR/snap.request`; the
   app writes `snap.png` next to it.
+- `AGENT_OFFICE_NOTIFY_LOG`: path to a file; notifications are appended there instead of
+  shown (for demos and tests).
 - `AGENT_OFFICE_DEMO_MACHINES`: path to a JSON file that replaces the machine-room probes
   (for screenshots and demos). See [`docs/demo-machines.json`](docs/demo-machines.json).
 
@@ -147,6 +171,12 @@ y muestra qué hacen tus agentes de Claude Code: la sesión principal y cada sub
 uno en su escritorio. Entran por la puerta cuando empiezan y salen cuando terminan; el que
 necesita tu permiso levanta la mano, muestra un `!` rojo y su escritorio brilla.
 
+- **Tu turno:** un letrero rojo arriba de la pizarra lista lo que espera por ti, lo más
+  antiguo primero y con cuánto lleva esperando: sesiones que terminaron y esperan tus
+  instrucciones, sesiones que te piden permiso o te hicieron una pregunta, PRs donde te
+  piden revisión e issues asignados a ti (clic para abrirlos). El líder que espera levanta
+  un letrero "¡tu turno!" y el título muestra "Tu turno: N". Con "Avisos con sonido" (clic
+  derecho) recibes una notificación de macOS cuando algo entra a la lista.
 - **Sala de máquinas:** lo que tienes corriendo para desarrollar. Un rack con una luz por
   contenedor de Docker, los emuladores de Android, dispositivos por USB y simuladores de
   iOS en su soporte, los servidores locales con su puerto (Metro 8081, web 3000, postgres,
